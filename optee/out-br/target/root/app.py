@@ -58,6 +58,9 @@ def main():
                              sasl_plain_username=username,
                              sasl_plain_password=password)
 
+    max_retrains = 2
+    retrain = 0
+    last_offset = -1
     counter = load_counter()
     print("============= poll global model =============")
     for message in consumer:
@@ -65,7 +68,17 @@ def main():
                                               message.offset, message.key))
         partition = TopicPartition(message.topic, message.partition)
         highwater = consumer.highwater(partition)
-        consumer.seek(partition, highwater - 1)
+        # Retrain
+        if message.offset == last_offset:
+            retrain += 1
+        else:
+            retrain = 0
+        last_offset = message.offset
+        if retrain < max_retrains - 1:
+            consumer.seek(partition, highwater - 1)
+        else:
+            consumer.seek(partition, highwater)
+        # Skip if model not the latest
         if highwater - message.offset > 1:
             continue
         print("============= start local training =============")
