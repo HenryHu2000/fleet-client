@@ -11,6 +11,7 @@ import re
 import uuid
 import os
 import uuid
+import sys
 from datetime import datetime, timezone
 
 def load_counter():
@@ -24,15 +25,24 @@ def store_counter(value):
         f.write(str(value))
 
 def on_send_success(record_metadata):
-    print(record_metadata.topic)
-    print(record_metadata.partition)
-    print(record_metadata.offset)
+    logging.info("%s:%d:%d" % (record_metadata.topic, record_metadata.partition,
+                                      record_metadata.offset))
 
 def on_send_error(excp):
-    logging.error('I am an errback', exc_info=excp)
+    logging.error('Failed to send the local model!', exc_info=excp)
     # handle exception
 
 def main():
+    formatter = logging.Formatter("%(asctime)s %(levelname)s (%(threadName)s) %(message)s")
+    logger = logging.getLogger()
+    logger.level = logging.INFO
+    fileHandler = logging.FileHandler("fltee.log")
+    fileHandler.setFormatter(formatter)
+    logger.addHandler(fileHandler)
+    consoleHandler = logging.StreamHandler()
+    consoleHandler.setFormatter(formatter)
+    logger.addHandler(consoleHandler)
+    
     servers = ['example.com:9092']
     username = 'username'
     password = 'password'
@@ -57,14 +67,14 @@ def main():
                              sasl_mechanism='PLAIN',
                              sasl_plain_username=username,
                              sasl_plain_password=password)
-
     max_retrains = 2
     retrain = 0
     last_offset = -1
     counter = load_counter()
-    print("============= poll global model =============")
+    
+    logging.info("============= poll global model =============")
     for message in consumer:
-        print("%s:%d:%d: key=%s" % (message.topic, message.partition,
+        logging.info("%s:%d:%d: key=%s" % (message.topic, message.partition,
                                               message.offset, message.key))
         partition = TopicPartition(message.topic, message.partition)
         highwater = consumer.highwater(partition)
@@ -81,7 +91,8 @@ def main():
         # Skip if model not the latest
         if highwater - message.offset > 1:
             continue
-        print("============= start local training =============")
+            
+        logging.info("============= start local training =============")
         supertask = message.value
         date_created = datetime.now(tz=timezone.utc).isoformat(timespec='milliseconds')
         with open("/root/models/mnist/mnist_lenet_global.weights_ree", "wb") as file:
@@ -89,8 +100,14 @@ def main():
         with open("/root/models/mnist/mnist_lenet_global.weights_tee", "wb") as file:
             file.write(base64.b64decode(supertask['inputModels'][0]['tee'].encode("ascii")))
         command = 'darknetp classifier train -pp_start 6 -pp_end 8 -ss 1 "cfg/mnist.dataset" "cfg/mnist_lenet.cfg" "models/mnist/mnist_lenet_global.weights"'
-        subprocess.call(shlex.split(command), cwd="/root/")
-        print("============= offer local model =============")
+        process = subprocess.Popen(shlex.split(command), cwd="/root/", stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        with process.stdout:
+            for line in iter(process.stdout.readline, b''):
+                logging.info("%s" % line.decode("ascii").rstrip('\n'))
+        exitcode = process.wait()
+        logging.info('Process finished with exit code %d' % exitcode)
+        
+        logging.info("============= offer local model =============")
         counter += 1
         store_counter(counter)
 
@@ -104,7 +121,7 @@ def main():
         # block until all async messages are sent
         producer.flush()
 
-        print("============= poll global model =============")
+        logging.info("============= poll global model =============")
 
 if __name__ == '__main__':
     main()
