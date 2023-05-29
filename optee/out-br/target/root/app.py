@@ -33,13 +33,13 @@ def on_send_error(excp):
     # handle exception
 
 def main():
-    servers = ['pkc-41mxj.uksouth.azure.confluent.cloud:9092']
+    servers = ['example.com:9092']
     username = 'username'
     password = 'password'
     mac_addr = ':'.join(re.findall('..', '%012x' % uuid.getnode()))
 
     # consume earliest available messages, don't commit offsets
-    consumer = KafkaConsumer('todo-tasks',
+    consumer = KafkaConsumer('client-todo-tasks',
                              group_id='fltee-client' + '-' + mac_addr,
                              bootstrap_servers=servers, 
                              value_deserializer=lambda m: json.loads(m.decode('ascii')), 
@@ -98,8 +98,8 @@ def main():
             ree_base64 = base64.b64encode(ree_file.read()).decode("ascii")
             tee_base64 = base64.b64encode(tee_file.read()).decode("ascii")
             local_model = {'id': str(uuid.uuid4()), 'ree': ree_base64, 'tee': tee_base64}
-            completed_task = {'id': str(uuid.uuid4()), 'dateCreated': date_created, 'taskType': 'TRAINING', 'taskStatus': 'COMPLETED', 'supertask': {'id': supertask['id']}, 'outputModels': [local_model]}
-            producer.send('done-tasks', completed_task).add_callback(on_send_success).add_errback(on_send_error)
+            completed_task = {'id': str(uuid.uuid4()), 'dateCreated': date_created, 'taskType': 'TRAINING', 'status': 'COMPLETED', 'supertask': {'id': supertask['id']}, 'outputModels': [local_model]}
+            producer.send('client-done-tasks', completed_task).add_callback(on_send_success).add_errback(on_send_error)
 
         # block until all async messages are sent
         producer.flush()
