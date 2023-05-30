@@ -16,18 +16,43 @@ from datetime import datetime, timezone
 import http.client
 import urllib
 import getpass
+import configparser
+ 
+def loadConfig():
+    config = configparser.ConfigParser()
+    if not config.read('config.ini'):
+        config['fleet.user'] = {}
+        config['fleet.user']['Username'] = ''
+        config['fleet.user']['Password'] = ''
+        config['fleet.kafka'] = {}
+        config['fleet.kafka']['Server'] = ''
+        config['fleet.kafka']['Username'] = ''
+        config['fleet.kafka']['Password'] = ''
+        config['fleet.statistics'] = {}
+        config['fleet.statistics']['TrainingCount'] = '0'
+        with open('config.ini', 'w') as configfile:
+            config.write(configfile)
+    return config
 
-def load_counter():
-    if not os.path.exists('counters.dat'):
-        return 0
-    with open('counters.dat', mode='r') as f:
-        return int(f.read())
+def saveConfig(config):
+    with open('config.ini', 'w') as configfile:
+        config.write(configfile)
 
-def store_counter(value):
-    with open('counters.dat', mode='w') as f:
-        f.write(str(value))
+def setupLogger():
+    formatter = logging.Formatter("%(asctime)s %(levelname)s (%(threadName)s) %(message)s")
+    logger = logging.getLogger()
+    logger.level = logging.INFO
+    fileHandler = logging.FileHandler("fleet.log")
+    fileHandler.setFormatter(formatter)
+    logger.addHandler(fileHandler)
+    consoleHandler = logging.StreamHandler()
+    consoleHandler.setFormatter(formatter)
+    logger.addHandler(consoleHandler)
 
-def register(username, password):
+def getMacAddress():
+    return ':'.join(re.findall('..', '%012x' % uuid.getnode()))
+
+def user_register(username, password):
     params = urllib.parse.urlencode({'username': username, 'password': password})
     headers = {"Content-type": "application/x-www-form-urlencoded", "Accept": "application/json"}
     conn = http.client.HTTPSConnection("fleet.haoweihu.com", 8443)
@@ -40,20 +65,22 @@ def register(username, password):
     conn.close()
     return json.loads(data.decode('ascii'))
 
-def login(username, password):
+def user_login(username, password):
     credentials = "Basic " + base64.b64encode((username + ":" + password).encode("ascii")).decode("ascii")
-    headers = {"Accept": "application/json", "Authorization": credentials}
+    headers = {"Authorization": credentials}
     conn = http.client.HTTPSConnection("fleet.haoweihu.com", 8443)
-    conn.request("POST", "/api/users/me", headers=headers)
+    conn.request("GET", "/api/users/me", headers=headers)
     response = conn.getresponse()
-    if response.status != 200:
-        return None
     logging.info("%s %s" % (response.status, response.reason))
+    if response.status != 200:
+        if response.status == 401:
+            logging.error("The username or password is incorrect!")
+        return None
     data = response.read()
     conn.close()
     return data.decode('ascii')
 
-def diagnosis():
+def run_diagnosis():
     logging.info('Running TEE diagnosis...')
     score = 0
     try:
@@ -67,34 +94,15 @@ def diagnosis():
     logging.info('score=%s' % score)
     return score
 
-def on_send_success(record_metadata):
-    logging.info("%s:%d:%d" % (record_metadata.topic, record_metadata.partition,
-                                      record_metadata.offset))
-
-def on_send_error(excp):
-    logging.error('Failed to send the local model!', exc_info=excp)
-    # handle exception
-
-def main():
-    formatter = logging.Formatter("%(asctime)s %(levelname)s (%(threadName)s) %(message)s")
-    logger = logging.getLogger()
-    logger.level = logging.INFO
-    fileHandler = logging.FileHandler("fleet.log")
-    fileHandler.setFormatter(formatter)
-    logger.addHandler(fileHandler)
-    consoleHandler = logging.StreamHandler()
-    consoleHandler.setFormatter(formatter)
-    logger.addHandler(consoleHandler)
-    
-    servers = ['example.com:9092']
-    username = 'username'
-    password = 'password'
-    mac_addr = ':'.join(re.findall('..', '%012x' % uuid.getnode()))
-    device_id = uuid.uuid3(uuid.UUID('00000000-0000-0000-0000-000000000000'), mac_addr)
+def setupKafka():
+    config = loadConfig()
+    servers = [config['fleet.kafka']['Server']]
+    username = config['fleet.kafka']['Username']
+    password = config['fleet.kafka']['Password']
 
     # consume earliest available messages, don't commit offsets
     consumer = KafkaConsumer('client-todo-tasks',
-                             group_id='fleet-client' + '-' + mac_addr,
+                             group_id='fleet-client' + '-' + getMacAddress(),
                              bootstrap_servers=servers, 
                              value_deserializer=lambda m: json.loads(m.decode('ascii')), 
                              auto_offset_reset='earliest', 
@@ -111,11 +119,23 @@ def main():
                              sasl_mechanism='PLAIN',
                              sasl_plain_username=username,
                              sasl_plain_password=password)
+    return producer, consumer
+
+def on_kafka_send_success(record_metadata):
+    logging.info("%s:%d:%d" % (record_metadata.topic, record_metadata.partition,
+                                      record_metadata.offset))
+
+def on_kafka_send_error(excp):
+    logging.error('Failed to send the local model!', exc_info=excp)
+    # handle exception
+
+def run_training_loop(producer, consumer):
+    config = loadConfig()    
+    device_id = uuid.uuid3(uuid.UUID('00000000-0000-0000-0000-000000000000'), getMacAddress())
+
     max_retrains = 2
     retrain = 0
     last_offset = -1
-    counter = load_counter()
-    
     logging.info("============= poll global model =============")
     for message in consumer:
         logging.info("%s:%d:%d: key=%s" % (message.topic, message.partition,
@@ -152,20 +172,41 @@ def main():
         logging.info('Process finished with exit code %d' % exitcode)
         
         logging.info("============= offer local model =============")
-        counter += 1
-        store_counter(counter)
+        config['fleet.statistics']['TrainingCount'] = str(config['fleet.statistics'].getint('TrainingCount') + 1)
+        saveConfig(config)
 
         with open("/root/tmp/backup/mnist_lenet.weights_ree", "rb") as ree_file, open("/root/tmp/backup/mnist_lenet.weights_tee", "rb") as tee_file:
             ree_base64 = base64.b64encode(ree_file.read()).decode("ascii")
             tee_base64 = base64.b64encode(tee_file.read()).decode("ascii")
             local_model = {'id': str(uuid.uuid4()), 'ree': ree_base64, 'tee': tee_base64}
             completed_task = {'id': str(uuid.uuid4()), 'dateCreated': date_created, 'taskType': 'TRAINING', 'status': 'COMPLETED', 'supertask': {'id': supertask['id']}, 'outputModels': [local_model]}
-            producer.send('client-done-tasks', completed_task).add_callback(on_send_success).add_errback(on_send_error)
+            producer.send('client-done-tasks', completed_task).add_callback(on_kafka_send_success).add_errback(on_kafka_send_error)
 
         # block until all async messages are sent
         producer.flush()
 
         logging.info("============= poll global model =============")
-
+    
+def main():
+    config = loadConfig()
+    setupLogger()
+    username = config['fleet.user']['username']
+    password = config['fleet.user']['password']
+    while True:
+        if username:
+            if not password:
+                password = getpass.getpass()
+            login_result = user_login(username, password)
+            if login_result:
+                break
+            else:
+                logging.info("Login failed.")
+        username = input('Username: ')
+        password = getpass.getpass()
+    logging.info("Welcome, %s!" % login_result)
+    
+    producer, consumer = setupKafka()
+    run_training_loop(producer, consumer)
+    
 if __name__ == '__main__':
     main()
