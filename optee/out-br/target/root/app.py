@@ -13,6 +13,9 @@ import os
 import uuid
 import sys
 from datetime import datetime, timezone
+import http.client
+import urllib
+import getpass
 
 def load_counter():
     if not os.path.exists('counters.dat'):
@@ -23,6 +26,46 @@ def load_counter():
 def store_counter(value):
     with open('counters.dat', mode='w') as f:
         f.write(str(value))
+
+def register(username, password):
+    params = urllib.parse.urlencode({'username': username, 'password': password})
+    headers = {"Content-type": "application/x-www-form-urlencoded", "Accept": "application/json"}
+    conn = http.client.HTTPSConnection("fleet.haoweihu.com", 8443)
+    conn.request("POST", "/api/public/register", params, headers)
+    response = conn.getresponse()
+    if response.status != 200:
+        return None
+    logging.info("%s %s" % (response.status, response.reason))
+    data = response.read()
+    conn.close()
+    return json.loads(data.decode('ascii'))
+
+def login(username, password):
+    credentials = "Basic " + base64.b64encode((username + ":" + password).encode("ascii")).decode("ascii")
+    headers = {"Accept": "application/json", "Authorization": credentials}
+    conn = http.client.HTTPSConnection("fleet.haoweihu.com", 8443)
+    conn.request("POST", "/api/users/me", headers=headers)
+    response = conn.getresponse()
+    if response.status != 200:
+        return None
+    logging.info("%s %s" % (response.status, response.reason))
+    data = response.read()
+    conn.close()
+    return data.decode('ascii')
+
+def diagnosis():
+    logging.info('Running TEE diagnosis...')
+    score = 0
+    try:
+        xtest_output = subprocess.check_output(['xtest'])
+    except:
+        pass
+    else:
+        score += 1
+        if (b'subtests of which 0 failed' in xtest_output and b'test cases of which 0 failed' in xtest_output):
+            score += 1
+    logging.info('score=%s' % score)
+    return score
 
 def on_send_success(record_metadata):
     logging.info("%s:%d:%d" % (record_metadata.topic, record_metadata.partition,
@@ -36,7 +79,7 @@ def main():
     formatter = logging.Formatter("%(asctime)s %(levelname)s (%(threadName)s) %(message)s")
     logger = logging.getLogger()
     logger.level = logging.INFO
-    fileHandler = logging.FileHandler("fltee.log")
+    fileHandler = logging.FileHandler("fleet.log")
     fileHandler.setFormatter(formatter)
     logger.addHandler(fileHandler)
     consoleHandler = logging.StreamHandler()
@@ -47,10 +90,11 @@ def main():
     username = 'username'
     password = 'password'
     mac_addr = ':'.join(re.findall('..', '%012x' % uuid.getnode()))
+    device_id = uuid.uuid3(uuid.UUID('00000000-0000-0000-0000-000000000000'), mac_addr)
 
     # consume earliest available messages, don't commit offsets
     consumer = KafkaConsumer('client-todo-tasks',
-                             group_id='fltee-client' + '-' + mac_addr,
+                             group_id='fleet-client' + '-' + mac_addr,
                              bootstrap_servers=servers, 
                              value_deserializer=lambda m: json.loads(m.decode('ascii')), 
                              auto_offset_reset='earliest', 
