@@ -69,7 +69,7 @@ def user_login(username, password):
     credentials = "Basic " + base64.b64encode((username + ":" + password).encode("ascii")).decode("ascii")
     headers = {"Authorization": credentials}
     conn = http.client.HTTPSConnection("fleet.haoweihu.com", 8443)
-    conn.request("GET", "/api/users/me", headers=headers)
+    conn.request("GET", "/api/users/login", headers=headers)
     response = conn.getresponse()
     logging.info("%s %s" % (response.status, response.reason))
     if response.status != 200:
@@ -129,9 +129,10 @@ def on_kafka_send_error(excp):
     logging.error('Failed to send the local model!', exc_info=excp)
     # handle exception
 
-def run_training_loop(producer, consumer):
+def run_training_loop(producer, consumer, user_id):
     config = loadConfig()    
-    device_id = uuid.uuid3(uuid.UUID('00000000-0000-0000-0000-000000000000'), getMacAddress())
+    mac_address = getMacAddress()
+    device_id = uuid.uuid3(uuid.UUID('00000000-0000-0000-0000-000000000000'), mac_address)
 
     max_retrains = 2
     retrain = 0
@@ -179,7 +180,9 @@ def run_training_loop(producer, consumer):
             ree_base64 = base64.b64encode(ree_file.read()).decode("ascii")
             tee_base64 = base64.b64encode(tee_file.read()).decode("ascii")
             local_model = {'id': str(uuid.uuid4()), 'ree': ree_base64, 'tee': tee_base64}
-            completed_task = {'id': str(uuid.uuid4()), 'dateCreated': date_created, 'taskType': 'TRAINING', 'status': 'COMPLETED', 'supertask': {'id': supertask['id']}, 'outputModels': [local_model]}
+            user = {'id': user_id}
+            device = {'id': str(device_id), 'macAddress': mac_address, 'securityLevel': 2}
+            completed_task = {'id': str(uuid.uuid4()), 'user': user, 'device': device, 'dateCreated': date_created, 'taskType': 'TRAINING', 'status': 'COMPLETED', 'supertask': {'id': supertask['id']}, 'outputModels': [local_model]}
             producer.send('client-done-tasks', completed_task).add_callback(on_kafka_send_success).add_errback(on_kafka_send_error)
 
         # block until all async messages are sent
@@ -203,10 +206,8 @@ def main():
                 logging.info("Login failed.")
         username = input('Username: ')
         password = getpass.getpass()
-    logging.info("Welcome, %s!" % login_result)
-    
     producer, consumer = setupKafka()
-    run_training_loop(producer, consumer)
+    run_training_loop(producer, consumer, login_result)
     
 if __name__ == '__main__':
     main()
