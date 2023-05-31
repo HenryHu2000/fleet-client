@@ -24,10 +24,17 @@ def loadConfig():
         config['fleet.user'] = {}
         config['fleet.user']['Username'] = ''
         config['fleet.user']['Password'] = ''
+        config['fleet.device'] = {}
+        config['fleet.device']['SecurityLevel'] = ''
+        config['fleet.server'] = {}
+        config['fleet.server']['Address'] = 'fleet.haoweihu.com'
+        config['fleet.server']['Port'] = '8443'
         config['fleet.kafka'] = {}
         config['fleet.kafka']['Server'] = ''
         config['fleet.kafka']['Username'] = ''
         config['fleet.kafka']['Password'] = ''
+        config['fleet.algorithm'] = {}
+        config['fleet.algorithm']['MaxRetrains'] = '2'
         config['fleet.statistics'] = {}
         config['fleet.statistics']['TrainingCount'] = '0'
         with open('config.ini', 'w') as configfile:
@@ -55,7 +62,7 @@ def getMacAddress():
 def user_register(username, password):
     params = urllib.parse.urlencode({'username': username, 'password': password})
     headers = {"Content-type": "application/x-www-form-urlencoded", "Accept": "application/json"}
-    conn = http.client.HTTPSConnection("fleet.haoweihu.com", 8443)
+    conn = http.client.HTTPSConnection(config['fleet.server']['Address'], int(config['fleet.server']['Port']))
     conn.request("POST", "/api/public/register", params, headers)
     response = conn.getresponse()
     if response.status != 200:
@@ -68,7 +75,7 @@ def user_register(username, password):
 def user_login(username, password):
     credentials = "Basic " + base64.b64encode((username + ":" + password).encode("ascii")).decode("ascii")
     headers = {"Authorization": credentials}
-    conn = http.client.HTTPSConnection("fleet.haoweihu.com", 8443)
+    conn = http.client.HTTPSConnection(config['fleet.server']['Address'], int(config['fleet.server']['Port']))
     conn.request("GET", "/api/users/login", headers=headers)
     response = conn.getresponse()
     logging.info("%s %s" % (response.status, response.reason))
@@ -95,7 +102,6 @@ def run_diagnosis():
     return score
 
 def setupKafka():
-    config = loadConfig()
     servers = [config['fleet.kafka']['Server']]
     username = config['fleet.kafka']['Username']
     password = config['fleet.kafka']['Password']
@@ -130,11 +136,10 @@ def on_kafka_send_error(excp):
     # handle exception
 
 def run_training_loop(producer, consumer, user_id):
-    config = loadConfig()    
     mac_address = getMacAddress()
     device_id = uuid.uuid3(uuid.UUID('00000000-0000-0000-0000-000000000000'), mac_address)
 
-    max_retrains = 2
+    max_retrains = int(config['fleet.algorithm']['MaxRetrains'])
     retrain = 0
     last_offset = -1
     logging.info("============= poll global model =============")
@@ -181,7 +186,7 @@ def run_training_loop(producer, consumer, user_id):
             tee_base64 = base64.b64encode(tee_file.read()).decode("ascii")
             local_model = {'id': str(uuid.uuid4()), 'ree': ree_base64, 'tee': tee_base64}
             user = {'id': user_id}
-            device = {'id': str(device_id), 'macAddress': mac_address, 'securityLevel': 2}
+            device = {'id': str(device_id), 'macAddress': mac_address, 'securityLevel': int(config['fleet.device']['SecurityLevel'])}
             completed_task = {'id': str(uuid.uuid4()), 'user': user, 'device': device, 'dateCreated': date_created, 'taskType': 'TRAINING', 'status': 'COMPLETED', 'supertask': {'id': supertask['id']}, 'outputModels': [local_model]}
             producer.send('client-done-tasks', completed_task).add_callback(on_kafka_send_success).add_errback(on_kafka_send_error)
 
@@ -191,8 +196,10 @@ def run_training_loop(producer, consumer, user_id):
         logging.info("============= poll global model =============")
     
 def main():
-    config = loadConfig()
     setupLogger()
+    if not config['fleet.device']['SecurityLevel']:
+        config['fleet.device']['SecurityLevel'] = str(run_diagnosis())
+        saveConfig(config)
     username = config['fleet.user']['username']
     password = config['fleet.user']['password']
     while True:
@@ -210,4 +217,5 @@ def main():
     run_training_loop(producer, consumer, login_result)
     
 if __name__ == '__main__':
+    config = loadConfig()
     main()
