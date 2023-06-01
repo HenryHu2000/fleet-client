@@ -113,6 +113,7 @@ def setupKafka():
                              value_deserializer=lambda m: json.loads(m.decode('ascii')), 
                              auto_offset_reset='earliest', 
                              enable_auto_commit=True,
+                             max_poll_interval_ms=43200000,
                              security_protocol="SASL_SSL",
                              sasl_mechanism='PLAIN',
                              sasl_plain_username=username,
